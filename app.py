@@ -6,17 +6,15 @@ import time
 from datetime import datetime
 
 # --- 页面配置 ---
-st.set_page_config(page_title="私人理财管家", layout="wide")
+st.set_page_config(page_title="我的基金管家", layout="wide")
 
-# --- 消息推送函数 (PushDeer版) ---
+# --- 消息推送函数 (PushDeer) ---
 def send_push(key, text, desp=""):
     if not key: return
     url = "https://api2.pushdeer.com/message/push"
     params = {"pushkey": key, "text": text, "desp": desp}
-    try:
-        requests.get(url, params=params)
-    except:
-        st.error("推送失败，请检查网络或Key")
+    try: requests.get(url, params=params, timeout=5)
+    except: pass
 
 # --- 获取数据函数 ---
 def get_fund_val(code):
@@ -37,69 +35,76 @@ def get_fund_val(code):
             }
     except: return None
 
-# --- 侧边栏设置 ---
-with st.sidebar:
-    st.header("🔔 推送设置")
-    push_key = st.text_input("输入 PushDeer Key", type="password", help="在此填入 PDU 开头的 Key")
-    alert_on = st.checkbox("开启暴跌预警 (-2%)", value=True)
-    report_on = st.checkbox("开启收盘战报 (14:55)", value=True)
-    
-    st.divider()
-    st.header("⚙️ 监控开关")
-    auto_refresh = st.checkbox("开启自动刷新", value=False)
-    refresh_rate = st.slider("刷新频率 (秒)", 30, 600, 60)
+# --- 初始化持仓数据 (根据你的截图) ---
+# 这样即使刷新，这几只基金也会默认存在
+initial_data = [
+    {"代码": "007413", "持仓份额": 1120.0, "持仓成本": 1.36}, # 易方达全球
+    {"代码": "012348", "持仓份额": 2450.0, "持仓成本": 1.07}, # 天弘有色
+    {"代码": "013508", "持仓份额": 3200.0, "持仓成本": 0.89}, # 华夏有色
+    {"代码": "161226", "持仓份额": 250.0,  "持仓成本": 0.85}  # 国投白银
+]
 
-# --- 主界面 ---
-st.title("📊 基金实时监控与推送系统")
-
-# 1. 持仓管理 (使用 Session State 保持数据)
 if 'holding_info' not in st.session_state:
-    st.session_state.holding_info = pd.DataFrame([{"代码": "004812", "持仓份额": 1000.0, "持仓成本": 2.90}])
+    st.session_state.holding_info = pd.DataFrame(initial_data)
 
-st.subheader("持仓配置")
-edited_df = st.data_editor(st.session_state.holding_info, num_rows="dynamic", use_container_width=True)
+# --- 界面展示 ---
+st.title("📈 我的私人基金持仓监控")
+
+with st.sidebar:
+    st.header("🔔 预警推送")
+    push_key = st.text_input("PushDeer Key", type="password")
+    auto_refresh = st.checkbox("实时监控 (每分钟刷新)", value=True)
+    st.info("提示：请在下方表格中微调你的实际‘份额’和‘成本’")
+
+# 1. 持仓编辑器
+st.subheader("我的持仓明细")
+edited_df = st.data_editor(
+    st.session_state.holding_info, 
+    num_rows="dynamic", 
+    use_container_width=True,
+    key="data_editor"
+)
+# 保存修改到 session
 st.session_state.holding_info = edited_df
 
-# 2. 核心逻辑
+# 2. 计算实时盈亏
 fund_codes = edited_df['代码'].tolist()
-
 if fund_codes:
     results = []
-    for code in fund_codes:
-        if len(str(code)) == 6:
+    with st.spinner('正在同步最新估值...'):
+        for code in fund_codes:
             data = get_fund_val(code)
             if data: results.append(data)
     
     if results:
-        df = pd.merge(pd.DataFrame(results), edited_df, on="代码", how="left")
-        df['今日收益'] = (df['估算净值'] - df['昨收净值']) * df['持仓份额']
-        df['总盈亏'] = (df['估算净值'] - df['持仓成本']) * df['持仓份额']
+        # 合并实时数据和用户持仓数据
+        display_df = pd.merge(pd.DataFrame(results), edited_df, on="代码", how="left")
         
-        # 统计指标
-        t_income = df['今日收益'].sum()
+        # 计算逻辑
+        display_df['今日收益'] = (display_df['估算净值'] - display_df['昨收净值']) * display_df['持仓份额']
+        display_df['持有盈亏'] = (display_df['估算净值'] - display_df['持仓成本']) * display_df['持仓份额']
+        
+        # 顶部指标卡
         c1, c2, c3 = st.columns(3)
-        c1.metric("今日预估收益", f"¥{t_income:.2f}", delta=f"{t_income:.2f}")
-        c2.metric("自选均幅", f"{df['估算涨跌幅'].mean():.2f}%")
-        c3.metric("最后同步时间", datetime.now().strftime("%H:%M:%S"))
+        total_income = display_df['今日收益'].sum()
+        c1.metric("今日预估总收益", f"¥ {total_income:.2f}", delta=f"{total_income:.2f}")
+        c2.metric("当前时间", datetime.now().strftime("%H:%M:%S"))
+        c3.success("数据来源：实时估值接口")
 
-        st.dataframe(df.style.highlight_max(axis=0, subset=['估算涨跌幅'], color='#ffcccc'), use_container_width=True)
+        # 数据表格展示
+        st.dataframe(
+            display_df.style.format({
+                "昨收净值": "{:.4f}", "估算净值": "{:.4f}", 
+                "估算涨跌幅": "{:.2f}%", "今日收益": "¥ {:.2f}", "持有盈亏": "¥ {:.2f}"
+            }).highlight_between(left=-100, right=-2, subset=['估算涨跌幅'], color='#ffcccc'),
+            use_container_width=True
+        )
 
-        # 3. 逻辑触发：预警与战报
-        current_time = datetime.now().strftime("%H:%M")
-        
-        # 暴跌预警逻辑
-        if alert_on and push_key:
-            for _, row in df.iterrows():
-                if row['估算涨跌幅'] <= -2.0:
-                    send_push(push_key, f"🚨 暴跌预警：{row['名称']}", f"当前跌幅：{row['估算涨跌幅']}%，建议关注。")
-        
-        # 收盘战报逻辑 (只在14:55触发一次)
-        if report_on and push_key and current_time == "14:55":
-            report_text = f"💰 今日收盘战报\n今日总收益：{t_income:.2f}元\n当前时间：{current_time}"
-            send_push(push_key, "📈 每日基金收盘战报", report_text)
-            st.toast("今日战报已推送到微信/手机")
+        # 3. 预警逻辑
+        if push_key and total_income < -100: # 假设总亏损超过100元就报警
+            send_push(push_key, "⚠️ 基金账户跌幅过大", f"当前今日总收益为: {total_income:.2f}")
 
-# 4. 自动刷新
+# 自动刷新
 if auto_refresh:
-    time.sleep(refresh_rate)
+    time.sleep(60)
     st.rerun()
